@@ -27,6 +27,7 @@ class State(object):
         self.curr_epoch_step = 0  # current step in epoch
         self.curr_global_step = 0  # current global step
         self.curr_epoch = 0  # current global epoch
+        self.global_epoch = 0  # global epoch across all run/phases
 
         # TODO: [LOW] better document this
         # for outputing value that will be tracked per step
@@ -194,6 +195,7 @@ class RunEngine(object):
                 pbar.update()
             pbar.close()  # to flush out the bar before doing end of epoch reporting
             self.state.curr_epoch += 1
+            self.state.global_epoch += 1
             self.__trigger_events(Events.EPOCH_COMPLETED)
 
             # TODO: [CRITICAL] align the protocol

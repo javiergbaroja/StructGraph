@@ -10,6 +10,7 @@ import scipy
 import cv2
 from collections import Counter
 from .positional_encodings import *
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def get_infer_bboxes(inst_map,edge_num,point_num):
 
     obj_ids = torch.unique(inst_map)
@@ -42,8 +43,8 @@ def get_bboxes(inst_map,type_map,edge_num,point_num):
     obj_ids = torch.unique(inst_map)
     #print(obj_ids)
     obj_ids = obj_ids[1:]
-
-    inst_map = inst_map.reshape(inst_map.shape[1],inst_map.shape[2])
+    if len(inst_map.shape) > 2:
+        inst_map = inst_map.reshape(inst_map.shape[-2],inst_map.shape[-1])
 
     h,w =  inst_map.shape[0],inst_map.shape[1]
     binary = np.array(inst_map).copy()
@@ -58,18 +59,18 @@ def get_bboxes(inst_map,type_map,edge_num,point_num):
     masks = inst_map == obj_ids[:, None, None]
 
     boxes = masks_to_boxes(masks)
-    boxes = np.array(boxes)
+    boxes = boxes.numpy()
     countour_points,select_shape_feats = get_countour_points(inst_map,obj_ids,centers,boxes,h,w,numbers=point_num)
 
     countour_points = countour_points.astype(float)
 
     classes = []
     for i in obj_ids:
-        label = Counter(type_map[inst_map==i]).most_common(1)[0][0]-1
+        label = Counter(type_map[inst_map==i]).most_common(1)[0][0]#-1
         classes.append(label)
 
     countour_points = torch.tensor(countour_points)
-    boxes = torch.tensor(boxes)
+    boxes = torch.from_numpy(boxes)
 
     select_shape_feats = torch.tensor(select_shape_feats)
     centers = torch.tensor(centers)
@@ -145,19 +146,24 @@ def get_countour_points(inst_map,obj_ids,centers,boxes,h,w,numbers=4):
     select_shape_feats = []
     for i in range(len(obj_ids)):
         n_id = obj_ids[i]
-        nuclei = np.zeros((h,w))
+        nuclei = np.zeros((h,w)).astype(np.uint8)
         nuclei[inst_map==n_id] = 255
         current_countour = []
         center = centers[i]
         bbox = boxes[i]
-        for mask in [nuclei]:
-            mask = np.uint8(mask)
-            cnt, contour = get_single_centerpoint(mask)
-            #print(cnt)
+        contour, __ = cv2.findContours(nuclei, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contour = torch.from_numpy(contour[0]).float()
+        x, y = center[1],center[0]
+        # if(M['m00'] == 0):
+        #     continue;
+        # for mask in [nuclei]:
+        #     mask = np.uint8(mask)
+        #     cnt, contour = get_single_centerpoint(mask)
+        #     #print(cnt)
            
-            contour = contour[0]
-            contour = torch.Tensor(contour).float()
-            x, y = center[1],center[0]
+        #     contour = contour[0]
+        #     contour = torch.Tensor(contour).float()
+        #     x, y = center[1],center[0]
         select_contour.append((np.array(y), np.array(x)))
         current_countour.append((y,x))
         dists, coords = get_coordinates(x, y, contour,number=numbers)
@@ -258,9 +264,9 @@ def crop_to_shape(x, y, data_format="NCHW"):
 
 
 def focal_loss(outputs, targets,class_weights,alpha=1, gamma=2,logits=False, reduce=True):
-    class_weights = torch.tensor(class_weights).to("cuda")
+    class_weights = torch.tensor(class_weights).to(device)
     criterion1 = nn.CrossEntropyLoss(weight=class_weights,reduction='none',label_smoothing=0.1)
-    ce_loss = criterion1(outputs, targets)
+    ce_loss = criterion1(input=outputs, target=targets)
     #print('ce_loss',ce_loss)
     pt = torch.exp(-ce_loss)
     focal_loss = (alpha * (1-pt)**gamma * ce_loss).mean()
@@ -342,15 +348,20 @@ def get_centerpoint(lis):
 
     return [int(x), int(y)]
 def get_single_centerpoint(mask):
-    contour, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
-    #contour.sort(key=lambda x: cv2.contourArea(x), reverse=True) #only save the biggest one
-
-    count = contour[0][:, 0, :]
+    contour, __ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+    # contours_ext, __ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     try:
-        center = get_centerpoint(count)
+        M = cv2.moments(contour[0])
+        cx = round(M['m10'] / M['m00'])
+        cy = round(M['m01'] / M['m00'])
+        center = [cx, cy]
     except:
-        x,y = count.mean(axis=0)
-        center=[int(x), int(y)]
+        try:
+            count = contour[0][:, 0, :]
+            center = get_centerpoint(count)
+        except:
+            x,y = count.mean(axis=0)
+            center=[int(x), int(y)]
 
         # max_points = 360
         # if len(contour[0]) > max_points:

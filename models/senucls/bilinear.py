@@ -4,6 +4,7 @@
 import numpy as np
 from math import floor, ceil
 import torch
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def interpolate(first_value: float, second_value: float, ratio: float) -> float:
     """Interpolate with a linear weighted sum."""
@@ -107,7 +108,7 @@ def bilinear_edge(image,single_centers,scale=0):
             out = bilinear_interpolation(single_centers[j][1],single_centers[j][0],image)
             #print(out.shape)
         else:
-            out = torch.zeros((64)).cuda()
+            out = torch.zeros((64)).to(device)
         out_centers.append(out)
     out_centers = torch.stack(out_centers)
     return out_centers

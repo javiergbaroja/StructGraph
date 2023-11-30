@@ -75,8 +75,7 @@ class FileLoader(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         path = self.info_list[idx]
-        #print(path)
-        data = np.load(path)
+        data = np.load(path, allow_pickle=True)[..., :5]
 
         # split stacked channel into image and label
         img = (data[..., :3]).astype("uint8")  # RGB images
@@ -142,7 +141,7 @@ class FileLoader(torch.utils.data.Dataset):
 
         return feed_dict
 
-    def __get_augmentation(self, mode, seed):
+    def __get_augmentation(self, mode, rng):
         if mode == "train":
             shape_augs = [
                 # * order = ``0`` -> ``cv2.INTER_NEAREST``
@@ -160,26 +159,26 @@ class FileLoader(torch.utils.data.Dataset):
                     rotate=(-179, 179),  # rotate by -179 to +179 degrees
                     order=0,  # use nearest neighbour
                     backend="cv2",  # opencv for fast processing
-                    seed=seed,
+                    seed=rng,
                 ),
                 # set position to 'center' for center crop
                 # else 'uniform' for random crop
                 iaa.CropToFixedSize(
                     self.input_shape[0], self.input_shape[1], position="center"
                 ),
-                iaa.Fliplr(0.5, seed=seed),
-                iaa.Flipud(0.5, seed=seed),
+                iaa.Fliplr(0.5, seed=rng),
+                iaa.Flipud(0.5, seed=rng),
             ]
 
             input_augs = [
                 iaa.OneOf(
                     [
                         iaa.Lambda(
-                            seed=seed,
+                            seed=rng,
                             func_images=lambda *args: gaussian_blur(*args, max_ksize=3),
                         ),
                         iaa.Lambda(
-                            seed=seed,
+                            seed=rng,
                             func_images=lambda *args: median_blur(*args, max_ksize=3),
                         ),
                         iaa.AdditiveGaussianNoise(
@@ -190,23 +189,23 @@ class FileLoader(torch.utils.data.Dataset):
                 iaa.Sequential(
                     [
                         iaa.Lambda(
-                            seed=seed,
+                            seed=rng,
                             func_images=lambda *args: add_to_hue(*args, range=(-8, 8)),
                         ),
                         iaa.Lambda(
-                            seed=seed,
+                            seed=rng,
                             func_images=lambda *args: add_to_saturation(
                                 *args, range=(-0.2, 0.2)
                             ),
                         ),
                         iaa.Lambda(
-                            seed=seed,
+                            seed=rng,
                             func_images=lambda *args: add_to_brightness(
                                 *args, range=(-26, 26)
                             ),
                         ),
                         iaa.Lambda(
-                            seed=seed,
+                            seed=rng,
                             func_images=lambda *args: add_to_contrast(
                                 *args, range=(0.75, 1.25)
                             ),

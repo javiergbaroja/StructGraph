@@ -27,7 +27,7 @@ import inspect
 import json
 import os
 import shutil
-
+from natsort import natsorted
 import matplotlib
 import numpy as np
 import torch
@@ -35,18 +35,20 @@ from docopt import docopt
 from tensorboardX import SummaryWriter
 from torch.nn import DataParallel  # TODO: switch to DistributedDataParallel
 from torch.utils.data import DataLoader
-import torchcontrib
-from torchcontrib.optim import SWA
+# import torchcontrib
+# from torchcontrib.optim import SWA
 from config import Config
 from dataloader.train_loader import FileLoader
-from misc.utils import rm_n_mkdir
+from misc.utils import rm_n_mkdir, parse_json_file
 from run_utils.engine import RunEngine
 from run_utils.utils import (
     check_log_dir,
     check_manual_seed,
     colored,
     convert_pytorch_checkpoint,
+    create_logger
 )
+import argparse
 
 
 #### have to move outside because of spawn
@@ -65,13 +67,45 @@ def worker_init_fn(worker_id):
     worker_info.dataset.setup_augmentor(worker_id, worker_seed)
     return
 
+def get_args():
 
+    parser = argparse.ArgumentParser()
+
+    ## Directory arguments
+    parser.add_argument('--val_file', type=str)
+    parser.add_argument('--train_file', type=str)
+    parser.add_argument('--save_dir', type=str, help='directory where the checkpoints after each epoch will be saved')
+    parser.add_argument('--source_dir', type=str, default='/storage/homefs/jg23p152/project/', help='path to project folder (where data is stored)')
+
+    ## Model training arguments
+    parser.add_argument('--dataset_name', type=str, default='lizard')
+    parser.add_argument('--nr_type', type=int, default=3, help='number of nuclear types (including background)')
+    parser.add_argument('--lr', type=str, default='1e-4,1e-4', help='learning rate for each training phase separated by comma')
+    parser.add_argument('--batch_size', type=str, default='10,4', help='batch size for each training phase separated by comma')
+    parser.add_argument('--nr_epochs', type=str, default='50,50', help='number of epochs for each training phase separated by comma')
+    parser.add_argument('--save_best_only', action='store_true', help='use if you only want the best epoch checkpoint to be saved')
+    parser.add_argument('--early_stopping', type=int, default=1000, help='number of epochs to wait before stopping training if validation loss does not improve')
+    parser.add_argument('--only_epithelial', action='store_true', help='use if you only want to train on epithelial cells')
+    parser.add_argument('--edge_num', type=int, default=4, help='number of edges per node in the graph')
+    parser.add_argument('--point_num', type=int, default=18, help='number of points per edge in the graph')
+
+    ## GPU arguments
+    parser.add_argument('--gpu', type=str, help='comma separated GPU list')
+    parser.add_argument('--view', type=str, default=None, help='visualise images after augmentation. Choose `train` or `valid`')
+    args = parser.parse_args()
+
+    # turn batch_size, nr_epochs, lr into list
+    args.lr = [float(lr) for lr in args.lr.split(',')]
+    args.batch_size = [int(batch_size) for batch_size in args.batch_size.split(',')]
+    args.nr_epochs = [int(nr_epochs) for nr_epochs in args.nr_epochs.split(',')]
+    return args
 ####
 class TrainManager(Config):
     """Either used to view the dataset or to initialise the main training loop."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, args):
+        super().__init__(args)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         return
 
     ####
@@ -109,7 +143,7 @@ class TrainManager(Config):
             data_dir_list = self.valid_dir_list
         for dir_path in data_dir_list:
             file_list.extend(glob.glob("%s/*.npy" % dir_path))
-        file_list.sort()  # to always ensure same input ordering
+        file_list = natsorted(file_list)  # to always ensure same input ordering
 
         assert len(file_list) > 0, (
             "No .npy found for `%s`, please check `%s` in `config.py`"
@@ -166,15 +200,18 @@ class TrainManager(Config):
             )
         ####
         def get_last_chkpt_path(prev_phase_dir, net_name):
-            stat_file_path = prev_phase_dir + "/stats.json"
-            with open(stat_file_path) as stat_file:
-                info = json.load(stat_file)
-            epoch_list = [int(v) for v in info.keys()]
-            last_chkpts_path = "%s/%s_epoch=%d.tar" % (
-                prev_phase_dir,
-                net_name,
-                max(epoch_list),
-            )
+            if not self.save_best_only:
+                stat_file_path = prev_phase_dir + "/stats.json"
+                with open(stat_file_path) as stat_file:
+                    info = json.load(stat_file)
+                epoch_list = [int(v) for v in info.keys()]
+                last_chkpts_path = "%s/%s_epoch=%d.tar" % (
+                    prev_phase_dir,
+                    net_name,
+                    max(epoch_list),
+                )
+            else:
+                last_chkpts_path = os.path.join(prev_phase_dir, "%s_last_epoch.tar" % net_name)
             return last_chkpts_path
 
         # TODO: adding way to load pretrained weight or resume the training
@@ -186,7 +223,7 @@ class TrainManager(Config):
                 net_info["desc"]
             ), "`desc` must be a Class or Function which instantiate NEW objects !!!"
             print(net_info) 
-            net_desc = net_info["desc"]()
+            net_desc = net_info["desc"]() # create_model (HoVerNet)
 
             # TODO: customize print-out for each run ?
             # summary_string(net_desc, (3, 270, 270), device='cpu')
@@ -196,7 +233,7 @@ class TrainManager(Config):
                 if pretrained_path == -1:
                     # * depend on logging format so may be broken if logging format has been changed
                     pretrained_path = get_last_chkpt_path(prev_log_dir, net_name)
-                    net_state_dict = torch.load(pretrained_path)["desc"]
+                    net_state_dict = torch.load(pretrained_path)
                 else:
                     chkpt_ext = os.path.basename(pretrained_path).split(".")[-1]
                     if chkpt_ext == "npz":
@@ -205,7 +242,7 @@ class TrainManager(Config):
                             k: torch.from_numpy(v) for k, v in net_state_dict.items()
                         }
                     elif chkpt_ext == "tar":  # ! assume same saving format we desire
-                        net_state_dict = torch.load(pretrained_path)["desc"]
+                        net_state_dict = torch.load(pretrained_path)
                         #net_state_dict.pop('encoder.patch_embed1.proj.weight')
                         #net_state_dict.pop('encoder.patch_embed1.proj.bias')
 
@@ -215,8 +252,8 @@ class TrainManager(Config):
                 )
 
                 # load_state_dict returns (missing keys, unexpected keys)
-                net_state_dict = convert_pytorch_checkpoint(net_state_dict)
-
+                global_epoch = net_state_dict['epoch'] if 'epoch' in net_state_dict else 0
+                net_state_dict = convert_pytorch_checkpoint(net_state_dict["desc"])
                 load_feedback = net_desc.load_state_dict(net_state_dict, strict=False)
                 # * uncomment for your convenience
                 print("Missing Variables: \n", load_feedback[0])
@@ -224,7 +261,7 @@ class TrainManager(Config):
 
             # * extremely slow to pass this on DGX with 1 GPU, why (?)
             net_desc = DataParallel(net_desc)
-            net_desc = net_desc.to("cuda")
+            net_desc = net_desc.to(self.device)
             # print(net_desc) # * dump network definition or not?
             optimizer, optimizer_args = net_info["optimizer"]
             optimizer = optimizer(net_desc.parameters(), **optimizer_args)
@@ -276,6 +313,8 @@ class TrainManager(Config):
         main_runner = runner_dict["train"]
         main_runner.state.logging = self.logging
         main_runner.state.log_dir = log_dir
+        main_runner.state.global_epoch = global_epoch
+        runner_dict["valid"].state.global_epoch = global_epoch
         # start the run loop
         main_runner.run(opt["nr_epochs"])
 
@@ -288,7 +327,7 @@ class TrainManager(Config):
     ####
     def run(self):
         """Define multi-stage run or cross-validation or whatever in here."""
-        self.nr_gpus = torch.cuda.device_count()
+        self.nr_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
         print('Detect #GPUS: %d' % self.nr_gpus)
 
         phase_list = self.model_config["phase_list"]
@@ -308,12 +347,14 @@ class TrainManager(Config):
 
 ####
 if __name__ == "__main__":
-    args = docopt(__doc__, version="HoVer-Net v1.0")
-    trainer = TrainManager()
-    if args["--view"]:
-        if args["--view"] != "train" and args["--view"] != "valid":
+    # args = docopt(__doc__, version="HoVer-Net v1.0")
+    args = get_args()
+    trainer = TrainManager(args)
+
+    if args.view:
+        if args.view != "train" and args.view != "valid":
             raise Exception('Use "train" or "valid" for --view.')
-        trainer.view_dataset(args["--view"])
+        trainer.view_dataset(args.view)
     else:
-        
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
         trainer.run()

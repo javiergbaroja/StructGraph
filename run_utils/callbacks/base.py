@@ -1,5 +1,6 @@
 import operator
 import json
+import os
 
 import cv2
 import matplotlib.pyplot as plt
@@ -8,6 +9,8 @@ import torch
 from misc.utils import center_pad_to_shape, cropping_center
 from scipy.stats import mode as major_value
 from sklearn.metrics import confusion_matrix
+
+from run_utils.utils import colored
 
 
 ####
@@ -76,28 +79,59 @@ class TriggerEngine(BaseCallbacks):
 class PeriodicSaver(BaseCallbacks):
     """Must declare save dir first in the shared global state of the attached engine."""
 
-    def __init__(self, per_n_epoch=1, per_n_step=None):
+    def __init__(self, per_n_epoch=1, per_n_step=None, save_best_only:bool=False, patience:int=10000):
         super().__init__()
         self.per_n_epoch = per_n_epoch
         self.per_n_step = per_n_step
+        self.save_best_only = save_best_only
+        self.best_epoch = -1
+        self.best_stat = -1
+        self.patience = patience
+        self.reset_patience = patience
 
     def run(self, state, event):
-        if not state.logging:
-            return
-
+        # if not state.logging:
+        #     return
         # TODO: add switch so that only one of [per_n_epoch / per_n_step] can run
-        if state.curr_epoch % self.per_n_epoch != 0:
+        if state.global_epoch % self.per_n_epoch != 0:
             return
-
+        
         for net_name, net_info in state.run_info.items():
-            net_checkpoint = {}
+            net_checkpoint = {'epoch': state.global_epoch}
             for key, value in net_info.items():
                 if key != "extra_info":
                     net_checkpoint[key] = value.state_dict()
+        
+        if self.save_best_only:
+            last_epoch_model_path = "%s/%s_last_epoch.tar" % (os.path.dirname(state.log_info['json_file']), net_name)
+            current_stat = state.tracked_step_output["scalar"]['tp_dice_1'] + state.tracked_step_output["scalar"]['tp_dice_2'] 
+            if current_stat > self.best_stat:
+                self.best_stat = current_stat
+                self.best_epoch = state.global_epoch
+                save_best = True
+                self.patience = self.reset_patience
+            else:
+                self.patience -= 1
+                save_best = False
+                if self.patience == 0:
+                    message = "Early stopping triggered after %d epochs with no improvement in validation performance. Forcing exit..." % (state.global_epoch)
+                    message = colored(message, color="red", attrs=["bold"])
+                    print(message)
+                    exit()      
+        else:
+            last_epoch_model_path = "%s/%s_epoch=%d.tar" % (os.path.dirname(state.log_info['json_file']), net_name, state.global_epoch)
+
+        torch.save(
+            net_checkpoint,
+            last_epoch_model_path)
+
+        if save_best:
+            net_checkpoint['epoch'] = self.best_epoch
             torch.save(
                 net_checkpoint,
-                "%s/%s_epoch=%d.tar" % (state.log_dir, net_name, state.curr_epoch),
-            )
+                "%s/%s_best_epoch.tar" % (os.path.dirname(state.log_info['json_file']), net_name),
+            )    
+
         return
 
 

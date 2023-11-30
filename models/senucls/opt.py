@@ -1,4 +1,5 @@
 import torch.optim as optim
+import torch.cuda as cuda
 
 from run_utils.callbacks.base import (
     AccumulateRawOutput,
@@ -15,12 +16,20 @@ from run_utils.engine import Events
 
 from .targets import gen_targets, prep_sample
 from .net_desc import create_model
-from .run_desc import proc_valid_step_output, train_step, valid_step, viz_step_output
+from .run_desc import proc_valid_step_output, get_train_step, get_valid_step, viz_step_output
 
 
 # TODO: training config only ?
 # TODO: switch all to function name String for all option
-def get_config(nr_type, mode):
+def get_config(nr_type:int, 
+               mode:str, 
+               class_weights:list,
+               only_epithelial:bool,
+               lr:list=[1e-4, 1e-4], 
+               batch_size:list=[16, 4], 
+               nr_epochs:list=[50,50], 
+               save_best_only:bool=False,
+               patience:int=10000):
     return {
         # ------------------------------------------------------------------
         # ! All phases have the same number of run engine
@@ -37,7 +46,7 @@ def get_config(nr_type, mode):
                         "optimizer": [
                             optim.Adam,
                             {  # should match keyword for parameters within the optimizer
-                                "lr": 1.0e-4,  # initial learning rate,
+                                "lr": lr[0],  # initial learning rate,
                                 "betas": (0.9, 0.999),
                             },
                         ],
@@ -52,13 +61,14 @@ def get_config(nr_type, mode):
                         },
                         # path to load, -1 to auto load checkpoint from previous phase,
                         # None to start from scratch
-                        "pretrained": "/data1/partitionA/CUHKSZ/histopath_2022/codes/hover_VAN_twobranch/van_base_convert.pth.tar",
-                        #'pretrained': "/mntnfs/med_data5/louwei/FS_models/panuke_k=4_n=18_weighted/00/net_epoch=11.tar",
+                        "pretrained": "/storage/homefs/jg23p152/project/pretrained/van_base_convert.pth.tar",
+                        # 'pretrained': None,
+                        "device": "cuda" if cuda.is_available() else "cpu",
                     },
                 },
                 "target_info": {"gen": (gen_targets, {}), "viz": (prep_sample, {})},
-                "batch_size": {"train": 32, "valid": 32,},  # engine name : value
-                "nr_epochs": 10,
+                "batch_size": {"train": batch_size[0], "valid": batch_size[0]*2},  # engine name : value
+                "nr_epochs": nr_epochs[0],
             },
             {
                 "run_info": {
@@ -71,7 +81,7 @@ def get_config(nr_type, mode):
                         "optimizer": [
                             optim.Adam,
                             {  # should match keyword for parameters within the optimizer
-                                "lr": 1.0e-4,  # initial learning rate,
+                                "lr": lr[1],  # initial learning rate,
                                 "betas": (0.9, 0.999),
                             },
                         ],
@@ -87,11 +97,12 @@ def get_config(nr_type, mode):
                         # path to load, -1 to auto load checkpoint from previous phase,
                         # None to start from scratch
                         "pretrained": -1,
+                        "device": "cuda" if cuda.is_available() else "cpu",
                     },
                 },
                 "target_info": {"gen": (gen_targets, {}), "viz": (prep_sample, {})},
-                "batch_size": {"train": 8, "valid": 8,}, # batch size per gpu
-                "nr_epochs": 100,
+                "batch_size": {"train": batch_size[1]*2, "valid": batch_size[1]*2,}, # batch size per gpu
+                "nr_epochs": nr_epochs[1],
             },
         ],
         # ------------------------------------------------------------------
@@ -101,9 +112,9 @@ def get_config(nr_type, mode):
         "run_engine": {
             "train": {
                 # TODO: align here, file path or what? what about CV?
-                "dataset": "kumar",  # whats about compound dataset ?
+                "dataset": "",  # whats about compound dataset ?
                 "nr_procs": 16,  # number of threads for dataloader
-                "run_step": train_step,  # TODO: function name or function variable ?
+                "run_step": get_train_step(class_weights, only_epithelial),  # TODO: function name or function variable ?
                 "reset_per_run": False,
                 # callbacks are run according to the list order of the event
                 "callbacks": {
@@ -113,29 +124,30 @@ def get_config(nr_type, mode):
                     ],
                     Events.EPOCH_COMPLETED: [
                         TrackLr(),
-                        PeriodicSaver(),
-                        #VisualizeOutput(viz_step_output),
+                        VisualizeOutput(viz_step_output),
                         LoggingEpochOutput(),
+                        # PeriodicSaver(save_best_only=save_best_only),
                         TriggerEngine("valid"),
                         ScheduleLr(),
                     ],
                 },
             },
             "valid": {
-                "dataset": "kumar",  # whats about compound dataset ?
+                "dataset": "",  # whats about compound dataset ?
                 "nr_procs": 8,  # number of threads for dataloader
-                "run_step": valid_step,
+                "run_step": get_valid_step(only_epithelial),
                 "reset_per_run": True,  # * to stop aggregating output etc. from last run
                 # callbacks are run according to the list order of the event
                 "callbacks": {
                     Events.STEP_COMPLETED: [AccumulateRawOutput(),],
-                    #Events.EPOCH_COMPLETED: [
+                    Events.EPOCH_COMPLETED: [
                         # TODO: is there way to preload these ?
-                        #ProcessAccumulatedRawOutput(
-                            #lambda a: proc_valid_step_output(a, nr_types=nr_type)
-                        #),
-                        #LoggingEpochOutput(),
-                    #],
+                        ProcessAccumulatedRawOutput(
+                            lambda a: proc_valid_step_output(a, nr_types=nr_type)
+                        ),
+                        LoggingEpochOutput(),
+                        PeriodicSaver(save_best_only=save_best_only, patience=patience),
+                    ],
                 },
             },
         },

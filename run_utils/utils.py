@@ -2,6 +2,9 @@ import os
 import random
 import shutil
 from collections import OrderedDict
+import gc
+import logging
+import sys
 
 import numpy as np
 import torch
@@ -199,3 +202,28 @@ def get_model_summary(
     summary_str += "Estimated Total Size (MB): %0.2f" % total_size + "\n"
     summary_str += "".join("-" for _ in range(len(header_line))) + "\n"
     return summary_str
+
+
+def create_logger(name:str=__name__):
+    logger = logging.getLogger(name)
+    if not logger.hasHandlers():
+        logger.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(lineno)d - %(levelname)s: %(message)s',
+                                    "%b-%d %H:%M:%S")
+        # Write logs to the SLURM output file
+        file_handler = logging.StreamHandler(sys.stdout)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    return logger
+
+
+def empty_trash():
+    gc.collect()
+    torch.cuda.empty_cache()
+
+def seed_everything(seed:int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    torch.use_deterministic_algorithms(True)

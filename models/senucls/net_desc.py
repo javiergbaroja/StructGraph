@@ -96,14 +96,13 @@ class SeNuclsNet(Net):
                 d = self.encoder(imgs,self.freeze)
             d3 = d[3]
             d3 = self.conv_bot(d3)
-            d = [d[0], d[1], d[2], d3]
-            #print(d0.shape, d1.shape, d2.shape, d3.shape)
+
+            #print(d[0].shape, d[1].shape, d[2].shape, d[3].shape)
         else:
             d = self.encoder(imgs)
             d3 = d[3]
             d3 = self.conv_bot(d3)
-            d = [d[0], d[1], d[2], d3]
-
+        d = [d[0], d[1], d[2], d3]
         # TODO: switch to `crop_to_shape` ?
         #print(d[0].shape, d[1].shape, d[2].shape, d3.shape)
         #print(d[0].shape, d[1].shape)
@@ -218,5 +217,5 @@ class SeNuclsNet(Net):
 def create_model(mode=None, **kwargs):
     if mode not in ['original', 'fast']:
         assert "Unknown Model Mode %s" % mode
-    return HoVerNet(mode=mode, **kwargs)
+    return SeNuclsNet(mode=mode, **kwargs)
 

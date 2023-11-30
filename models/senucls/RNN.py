@@ -36,9 +36,9 @@ class RNN(nn.Module):
 
 
 	def forward(self, input):
-		#device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+		device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 		input = input.float()
-		h = torch.zeros(2, input.size(0), self.hidden_dim).requires_grad_().to('cuda').float()
+		h = torch.zeros(2, input.size(0), self.hidden_dim).requires_grad_().to(device).float()
 
 		#embeds = self.embedding(batch)
 		#packed_input = pack_padded_sequence(input, lengths)
