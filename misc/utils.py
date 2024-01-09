@@ -42,14 +42,16 @@ def cropping_center(x, crop_shape, batch=False):
     
     """
     orig_shape = x.shape
-    if not batch:
-        h0 = int((orig_shape[0] - crop_shape[0]) * 0.5)
-        w0 = int((orig_shape[1] - crop_shape[1]) * 0.5)
-        x = x[h0 : h0 + crop_shape[0], w0 : w0 + crop_shape[1]]
-    else:
-        h0 = int((orig_shape[1] - crop_shape[0]) * 0.5)
-        w0 = int((orig_shape[2] - crop_shape[1]) * 0.5)
-        x = x[:, h0 : h0 + crop_shape[0], w0 : w0 + crop_shape[1]]
+    if crop_shape[0] < orig_shape[0] or crop_shape[1] < orig_shape[1]:
+        if not batch:
+            h0 = int((orig_shape[0] - crop_shape[0]) * 0.5)
+            w0 = int((orig_shape[1] - crop_shape[1]) * 0.5)
+            x = x[h0 : h0 + crop_shape[0], w0 : w0 + crop_shape[1]]
+        else:
+            h0 = int((orig_shape[1] - crop_shape[0]) * 0.5)
+            w0 = int((orig_shape[2] - crop_shape[1]) * 0.5)
+            x = x[:, h0 : h0 + crop_shape[0], w0 : w0 + crop_shape[1]]
+
     return x
 
 

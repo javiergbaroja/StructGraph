@@ -63,14 +63,14 @@ class InferManager(object):
         model_creator = getattr(model_desc, "create_model")
 
         net = model_creator(**self.method["model_args"])
-        saved_state_dict = torch.load(self.method["model_path"])["desc"]
+        saved_state_dict = torch.load(self.method["model_path"], map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))["desc"]
         saved_state_dict = convert_pytorch_checkpoint(saved_state_dict)
 
         net.load_state_dict(saved_state_dict, strict=False)
         net = torch.nn.DataParallel(net)
-        net = net.to("cuda")
+        net = net.to('cuda' if torch.cuda.is_available() else 'cpu')
 
-        module_lib = import_module("models.senucls.run_desc")
+        module_lib = import_module("models.senucls.run_desc_custom")
         run_step = getattr(module_lib, "infer_step")
         self.run_step = lambda input_batch: run_step(input_batch, net)
         

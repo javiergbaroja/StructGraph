@@ -31,7 +31,7 @@ def fig2data(fig, dpi=180):
 class _Scalar(object):
     @staticmethod
     def to_console(value):
-        return "%0.5f" % value
+        return "%0.7f" % value
 
     @staticmethod
     def to_json(value):

@@ -10,6 +10,7 @@ import scipy
 import cv2
 from collections import Counter
 from .positional_encodings import *
+from skimage.measure import regionprops
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def get_infer_bboxes(inst_map,edge_num,point_num):
 
@@ -37,6 +38,50 @@ def get_infer_bboxes(inst_map,edge_num,point_num):
     edge_index = torch.tensor(edge_index)
     edge_index = edge_index.permute(1,0)
     return boxes,centers,edge_points,edge_index,out_pos,select_shape_feats
+
+
+def get_bboxes_skimage(inst_map,type_map,edge_num,point_num):
+
+    obj_ids = torch.unique(inst_map)
+    #print(obj_ids)
+    obj_ids = obj_ids[1:]
+    if len(inst_map.shape) > 2:
+        inst_map = inst_map.reshape(inst_map.shape[-2],inst_map.shape[-1])
+
+    h,w =  inst_map.shape[0], inst_map.shape[1]
+
+    centers = [obj.centroid for obj in regionprops(inst_map.numpy().astype(np.int32))]
+
+    edge_points, edge_index = get_adjacent_matrix(centers,edge_num,'k-nearst')
+
+    out_pos = positional_embedding(centers,h,w,scale=0.25)
+
+    masks = inst_map == obj_ids[:, None, None]
+
+    boxes = masks_to_boxes(masks)
+    boxes = boxes.numpy()
+    countour_points,select_shape_feats = get_countour_points(inst_map,obj_ids,centers,boxes,h,w,numbers=point_num)
+
+    countour_points = countour_points.astype(float)
+
+    classes = []
+    for i in obj_ids:
+        label = Counter(type_map[inst_map==i]).most_common(1)[0][0]#-1
+        classes.append(label)
+
+    countour_points = torch.tensor(countour_points)
+    boxes = torch.from_numpy(boxes)
+
+    select_shape_feats = torch.tensor(select_shape_feats)
+    centers = torch.tensor(centers)
+
+    classes = torch.tensor(classes)
+
+    edge_points = torch.tensor(edge_points)
+    edge_index = torch.tensor(edge_index)
+    edge_index = edge_index.permute(1,0)
+
+    return boxes,classes,centers,edge_points,edge_index,out_pos,select_shape_feats
     
 def get_bboxes(inst_map,type_map,edge_num,point_num):
 

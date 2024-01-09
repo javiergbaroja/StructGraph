@@ -88,7 +88,7 @@ class SeNuclsNet(Net):
         self.weights_init()
 
     def forward(self, imgs, bboxes,centers,edge_points,edge_indexes,batch_pos_emb,batch_select_shape_feats,mode):
-
+        assert imgs.shape[0] == len(bboxes), "Batch size mismatch. Cannot run on multiple GPU because lists are not split with DataParallel"
         imgs = imgs / 255.0  # to 0-1 range to match XY
         #print(imgs.shape)
         if self.training:

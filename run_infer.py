@@ -10,7 +10,7 @@ Options:
   --version                   Show version.
 
   --gpu=<id>                  GPU list. [default: 0]
-  --nr_types=<n>              Number of nuclei types to predict. [default: 0]
+  --nr_types=<n>              Number of nuclei types to predict. [default: 3]
   --type_info_path=<path>     Path to a json define mapping between type id, type name, 
                               and expected overlaid color. [default: '']
 
@@ -33,7 +33,7 @@ Arguments for processing tiles.
 
 usage:
     tile (--input_dir=<path>) (--output_dir=<path>) (--inst_dir=<path>) \
-         [--draw_dot] [--save_qupath] [--save_raw_map] [--mem_usage=<n>]
+         [--draw_dot] [--save_qupath] [--save_raw_map] [--mem_usage=<n>] [--only_epithelial]
     
 options:
    --input_dir=<path>     Path to input data directory. Assumes the files are not nested within directory.
@@ -45,6 +45,7 @@ options:
    --draw_dot             To draw nuclei centroid on overlay. [default: False]
    --save_qupath          To optionally output QuPath v0.2.3 compatible format. [default: False]
    --save_raw_map         To save raw prediction or not. [default: False]
+   --only_epithelial      Whether to train only on epithelial cells. [default: False]
 """
 
 wsi_cli = """
@@ -114,7 +115,7 @@ if __name__ == '__main__':
     gpu_list = args.pop('--gpu')
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu_list
 
-    nr_gpus = torch.cuda.device_count()
+    nr_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     log_info('Detect #GPUS: %d' % nr_gpus)
 
     args = {k.replace('--', '') : v for k, v in args.items()}
@@ -159,6 +160,7 @@ if __name__ == '__main__':
             'draw_dot'    : sub_args['draw_dot'],
             'save_qupath' : sub_args['save_qupath'],
             'save_raw_map': sub_args['save_raw_map'],
+            'only_epithelial': sub_args['only_epithelial']
         })
 
     if sub_cmd == 'wsi':

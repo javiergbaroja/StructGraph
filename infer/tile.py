@@ -18,7 +18,7 @@ from concurrent.futures import FIRST_EXCEPTION, ProcessPoolExecutor, as_complete
 from functools import reduce
 from importlib import import_module
 from multiprocessing import Lock, Pool
-import PIL.Image as Image
+from skimage.morphology import dilation, disk
 import cv2
 import numpy as np
 import psutil
@@ -26,7 +26,7 @@ import scipy.io as sio
 import torch
 import torch.utils.data as data
 import tqdm
-from dataloader.infer_loader import SerializeArray, SerializeFileList,FileLoader
+from dataloader.infer_loader import SerializeArray, SerializeFileList
 from misc.utils import (
     color_deconvolution,
     cropping_center,
@@ -34,8 +34,9 @@ from misc.utils import (
     log_debug,
     log_info,
     rm_n_mkdir,
+    parse_json_file
 )
-from misc.viz_utils import colorize, visualize_instances_dict,visualize_instances_map
+from misc.viz_utils import colorize, visualize_instances_dict
 from skimage import color
 
 import convert_format
@@ -56,7 +57,7 @@ def _prepare_patching(img,inst_map, window_size, mask_size, return_src_top_corne
 
     win_size = window_size
     msk_size = step_size = mask_size
-    #print(win_size,step_size)
+
     def get_last_steps(length, msk_size, step_size):
         nr_step = math.ceil((length - msk_size) / step_size)
         last_step = (nr_step + 1) * step_size
@@ -72,9 +73,9 @@ def _prepare_patching(img,inst_map, window_size, mask_size, return_src_top_corne
     padt = padl = diff // 2
     padb = last_h + win_size - im_h
     padr = last_w + win_size - im_w
-    #print(img.shape)
+
     img = np.lib.pad(img, ((padt, padb), (padl, padr), (0, 0)), "constant")
-    #print(img.shape)
+
     inst_map = np.lib.pad(inst_map, ((padt, padb), (padl, padr)), "constant")
     # generating subpatches index from orginal
     coord_y = np.arange(0, last_h, step_size, dtype=np.int32)
@@ -89,8 +90,6 @@ def _prepare_patching(img,inst_map, window_size, mask_size, return_src_top_corne
     col_idx = col_idx.flatten()
     #
     patch_info = np.stack([coord_y, coord_x, row_idx, col_idx], axis=-1)
-    
-    #print(patch_info)
     if not return_src_top_corner:
         return img,inst_map, patch_info
     else:
@@ -112,10 +111,9 @@ def _post_process_patches(
 
     """
     # re-assemble the prediction, sort according to the patch location within the original image
-    
     patch_info = sorted(patch_info, key=lambda x: [x[0][0], x[0][1]])
     patch_info, patch_data = zip(*patch_info)
-    
+
     patch_shape = np.squeeze(patch_data[0]).shape
     ch = 1 if len(patch_shape) == 2 else patch_shape[-1]
     axes = [0, 2, 1, 3, 4] if ch != 1 else [0, 2, 1, 3]
@@ -131,7 +129,7 @@ def _post_process_patches(
     # crop back to original shape
     src_shape = image_info["src_shape"]
     pred_map = np.squeeze(pred_map[: src_shape[0], : src_shape[1]])
-    
+
     src_image = image_info['src_image']
     inst_map = image_info['inst_map']
     #cv2.imwrite('inst_map.png', inst_map*255)
@@ -278,11 +276,21 @@ class InferManager(base.InferManager):
         assert self.mem_usage < 1.0 and self.mem_usage > 0.0
 
         # * depend on the number of samples and their size, this may be less efficient
+        root_dir = '/storage/homefs/jg23p152/project/'
         patterning = lambda x: re.sub("([\[\]])", "[\\1]", x)
-        file_path_list = glob.glob(patterning("%s/*" % self.input_dir))
-        inst_path_list = glob.glob(patterning("%s/*" % self.inst_dir))
-        file_path_list.sort() 
-        inst_path_list.sort()        # ensure same order
+        if os.path.isdir(self.input_dir):
+            file_path_list = glob.glob(patterning("%s/*" % self.input_dir))
+        else:
+            file_path_list = [tile['img_file'] for tile in parse_json_file(self.input_dir)]
+            if root_dir not in file_path_list[0]:
+                file_path_list = [root_dir + path for path in file_path_list]
+        
+        # file_path_list = glob.glob(patterning("%s/*" % self.input_dir))
+        # inst_path_list = glob.glob(patterning("%s/*" % self.inst_dir))
+        # file_path_list.sort()  # ensure same order 
+        # inst_path_list.sort()        # ensure same order
+        
+        file_path_list.sort()  # ensure same order
         assert len(file_path_list) > 0, 'Not Detected Any Files From Path'
         
         rm_n_mkdir(self.output_dir + '/json/')
@@ -327,7 +335,7 @@ class InferManager(base.InferManager):
             nuc_uid_list = np.array(list(inst_info_dict.keys()))[:,None]
             nuc_type_list = np.array([v["type"] for v in nuc_val_list])[:,None]
             nuc_coms_list = np.array([v["centroid"] for v in nuc_val_list])
-            #print(nuc_coms_list)
+
             mat_dict = {
                 "inst_map" : pred_inst,
                 "inst_uid" : nuc_uid_list,
@@ -357,6 +365,7 @@ class InferManager(base.InferManager):
             save_path = "%s/json/%s.json" % (self.output_dir, img_name)
             self.__save_json(save_path, inst_info_dict, None)
             return img_name
+
         def detach_items_of_uid(items_list, uid, nr_expected_items):
             item_counter = 0
             detached_items_list = []
@@ -374,6 +383,40 @@ class InferManager(base.InferManager):
             # do this to ensure the ordering
             remained_items_list = remained_items_list + items_list
             return detached_items_list, remained_items_list
+
+        def clean_inst_map(inst_map:np.ndarray, retain_type:list, mat_file:dict, key:str) -> np.ndarray:
+            """Clean instance map keeping instances of epithelial type.
+            
+            Args:
+                inst_map: instance map to clean
+                retain_type: list of types to retain
+                mat_file: mat file with instance type information
+                key: key of mat file containing the type information
+            
+            """
+            type_list = mat_file[key].flatten()
+            inst_to_keep = []
+            for tp in retain_type:
+                inst_to_keep.extend((np.argwhere(type_list == tp).flatten()+1).tolist())
+            # now, pixels of inst_map with values in inst_to_keep are to be retained (with original value)
+            inst_map *= np.isin(inst_map, inst_to_keep).astype(np.uint8) 
+            return inst_map
+        
+        def prepare_inst_map(mat_file:dict, img:np.ndarray) -> np.ndarray:
+            """Prepare instance map for processing. The mat_file only contains centroid information. The centroids are used to generate the instance map.
+            
+            Args:
+                mat_file: mat file dictionary containing the centroids information
+                img: original image
+            """
+            inst_map = np.zeros(img.shape[:2], dtype=np.int32)
+            inst_centroids = mat_file['inst_centroid']
+            inst_centroids = inst_centroids.astype(np.int32)
+            for i, centroid in enumerate(inst_centroids):
+                inst_map[centroid[1], centroid[0]] = i+1
+    
+            return dilation(inst_map, disk(4))
+            
 
         proc_pool = None
         if self.nr_post_proc_workers > 0:
@@ -404,13 +447,24 @@ class InferManager(base.InferManager):
                 file_path = file_path_list.pop(0)
                 #inst_path = inst_path_list.pop(0)
                 inst_name = os.path.basename(file_path)[:-4] + '.mat'
-                #inst_name = 'PanNuke' + os.path.basename(file_path)[3:-4] + '.mat'
+
                 if inst_name in mat_files:
-                    inst_path = self.inst_dir + inst_name
+                    inst_path = os.path.join(self.inst_dir, inst_name)
                     img = cv2.imread(file_path)
                     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     src_shape = img.shape
-                    inst_map = sio.loadmat(inst_path)['inst_map']
+                    mat_file = sio.loadmat(inst_path)
+                    inst_map = mat_file['inst_map'] if 'inst_map' in mat_file else prepare_inst_map(mat_file, img)
+                    if self.only_epithelial:
+                        if 'Data/' in inst_path:
+                            tp_key = 'class' if 'class' in mat_file else 'inst_type'
+                            retain_type = [1, 2] if 'Data/Test/TCGA' in inst_path else [2]
+                            inst_map = clean_inst_map(inst_map, retain_type, mat_file, tp_key)
+                        else:
+                            tp_key = 'inst_type'
+                            inst_map = clean_inst_map(inst_map, [1,2], mat_file, tp_key)                      
+                        
+                        
                     img, inst_map,patch_info, top_corner = _prepare_patching(
                         img,inst_map, self.patch_input_shape, self.patch_output_shape, True
                     )
@@ -441,7 +495,7 @@ class InferManager(base.InferManager):
                 #cache_image_list, cache_inst_list
             #)
             dataset = SerializeFileList(
-                cache_image_list,cache_inst_list, cache_patch_info_list, self.patch_input_shape
+                cache_image_list, cache_inst_list, cache_patch_info_list, self.patch_input_shape
             )
             dataloader = data.DataLoader(
                 dataset,
@@ -468,13 +522,11 @@ class InferManager(base.InferManager):
                 sample_output_list = np.split(
                     sample_output_list, curr_batch_size, axis=0
                 )
-                #print('11111',sample_info_list,curr_batch_size)
                 sample_info_list = np.split(sample_info_list, curr_batch_size, axis=0)
                 sample_output_list = list(zip(sample_info_list, sample_output_list))
                 accumulated_patch_output.extend(sample_output_list)
                 pbar.update()
             pbar.close()
-
 
             # * parallely assemble the processed cache data for each file if possible
             future_list = []
@@ -483,6 +535,7 @@ class InferManager(base.InferManager):
                 file_ouput_data, accumulated_patch_output = detach_items_of_uid(
                     accumulated_patch_output, file_idx, image_info[1]
                 )
+
                 #print(file_ouput_data.shape,accumulated_patch_output.shape)
                 src_pos = image_info[2]  # src top left corner within padded image
                 src_image = cache_image_list[file_idx]
@@ -490,7 +543,7 @@ class InferManager(base.InferManager):
                     src_pos[0] : src_pos[0] + image_info[0][0],
                     src_pos[1] : src_pos[1] + image_info[0][1],
                 ]
-                
+
                 src_inst = cache_inst_list[file_idx]
                 src_inst = src_inst[
                     src_pos[0] : src_pos[0] + image_info[0][0],
@@ -521,7 +574,7 @@ class InferManager(base.InferManager):
                     file_info,
                     overlay_kwargs,
                 )
-                #print(type_map.shape)
+
                 name, pred_map, pred_inst, inst_info_dict, overlaid_img = _post_process_patches(self.post_proc_func, post_proc_kwargs, file_ouput_data, file_info, self.type_info_dict)
                 # dispatch for parallel post-processing
 
