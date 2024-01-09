@@ -34,7 +34,8 @@ import torch
 from docopt import docopt
 from tensorboardX import SummaryWriter
 from torch.nn import DataParallel  # TODO: switch to DistributedDataParallel
-from torch.utils.data import DataLoader
+# from torch.utils.data import DataLoader
+from run_utils.utils import MultiEpochsDataLoader as DataLoader
 # import torchcontrib
 # from torchcontrib.optim import SWA
 from config import Config
