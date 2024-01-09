@@ -61,40 +61,24 @@ def get_train_step(training_weights, only_epithelial):
             true_tp = batch_data["tp_map"]
             #print(true_tp.shape)
 
-            if not only_epithelial:
-                true_tp += batch_data["np_map"]
+            # if not only_epithelial:
+            #     true_tp += batch_data["np_map"]
 
             true_tp = torch.squeeze(true_tp).to(device).type(torch.int64)
             true_tp_onehot = F.one_hot(true_tp, num_classes=model.module.nr_types)
             true_tp_onehot = true_tp_onehot.type(torch.float32)
             true_dict["tp"] = true_tp_onehot
         #print(inst_map.shape)
-        type_map = batch_data["tp_map"]
-        batch_boxes = []
-        inst_classes= []
-        batch_centers = []
-        batch_edge_points = []
-        batch_edge_indexs = []
-        batch_pos_emb = []
-        batch_length = []
-        batch_select_shape_feats = []
+        # type_map = batch_data["tp_map"]
+        batch_boxes = batch_data['batch_boxes']
+        batch_centers = batch_data['batch_centers']
+        batch_edge_points = batch_data['batch_edge_points']
+        batch_edge_indexs = batch_data['batch_edge_indexs']
+        batch_pos_emb = batch_data['batch_pos_emb']
+        # batch_length = batch_data['batch_length']
+        batch_select_shape_feats = batch_data['batch_select_shape_feats']
+        inst_classes = batch_data['inst_classes']
 
-        if only_epithelial:
-            inst_map = inst_map * (type_map != 0)
-
-        for i in range(inst_map.shape[0]):
-            single_map = inst_map[i,:,:].reshape(1,inst_map.shape[1],inst_map.shape[2])
-            single_type_map = type_map[i,:,:]
-            boxes,inst_class,centers,edge_points,edge_index,pos_emd,select_shape_feats = get_bboxes(single_map,single_type_map,edge_num,point_num)
-
-            batch_select_shape_feats.append(select_shape_feats)
-            batch_length.append(centers.shape[0])
-            batch_boxes.append(boxes)
-            batch_centers.append(centers)
-            batch_edge_points.append(edge_points)
-            batch_edge_indexs.append(edge_index)
-            batch_pos_emb.append(pos_emd)
-            inst_classes.append(inst_class.reshape(inst_class.shape[0],1))
         #batch_centers = torch.stack(batch_centers)
         #batch_edge_matrix = torch.stack(batch_edge_matrix)
         #batch_pos_emb = torch.stack(batch_pos_emb)
@@ -215,42 +199,28 @@ def get_valid_step(only_epithelial):
         if model.module.nr_types is not None:
             true_tp = batch_data["tp_map"]
 
-            if not only_epithelial:
-                true_tp += batch_data["np_map"]
+            # if not only_epithelial:
+            #     true_tp += batch_data["np_map"]
             true_tp = torch.squeeze(true_tp).to(device).type(torch.int64)
             true_dict["tp"] = true_tp
 
         type_map = batch_data["tp_map"]
-        batch_boxes = []
-        inst_classes= []
-        batch_centers = []
-        batch_edge_points = []
-        batch_edge_indexs = []
-        batch_pos_emb = []
-        batch_length = []
-        batch_select_shape_feats = []
-
-        if only_epithelial:
-            inst_map = inst_map * (type_map != 0)
-
-        for i in range(inst_map.shape[0]):
-            single_map = inst_map[i,:,:].reshape(1,inst_map.shape[1],inst_map.shape[2])
-            single_type_map = type_map[i,:,:]
-            boxes,inst_class,centers,edge_points,edge_index,pos_emd,select_shape_feats = get_bboxes(single_map,single_type_map,edge_num,point_num)
-            batch_length.append(centers.shape[0])
-            batch_select_shape_feats.append(select_shape_feats)
-            batch_boxes.append(boxes)
-            batch_centers.append(centers)
-            batch_edge_points.append(edge_points)
-            batch_edge_indexs.append(edge_index)
-            batch_pos_emb.append(pos_emd)
-            inst_classes.append(inst_class.reshape(inst_class.shape[0],1))
+        batch_boxes = batch_data['batch_boxes']
+        batch_centers = batch_data['batch_centers']
+        batch_edge_points = batch_data['batch_edge_points']
+        batch_edge_indexs = batch_data['batch_edge_indexs']
+        batch_pos_emb = batch_data['batch_pos_emb']
+        # batch_length = batch_data['batch_length']
+        batch_select_shape_feats = batch_data['batch_select_shape_feats']
+        inst_classes = batch_data['inst_classes']
+        
         inst_classes =  torch.cat(inst_classes,0) - 1
         # --------------------------------------------------------------
         with torch.no_grad():  # dont compute gradient
-            pred_dict = model(imgs_gpu,batch_boxes,batch_centers,batch_edge_points,batch_edge_indexs,batch_pos_emb,batch_select_shape_feats,mode='train')
+            pred_dict = model(imgs,batch_boxes,batch_centers,batch_edge_points,batch_edge_indexs,batch_pos_emb,batch_select_shape_feats,mode='train')
             pred_map, pred_classes = pred_dict["tp"][0],pred_dict["tp"][1]
             pred_map = pred_map.permute(0, 2, 3, 1).contiguous()
+            pred_classes = torch.argmax(pred_classes, dim=-1)
             type_map = torch.argmax(pred_map, dim=-1, keepdim=False)
             type_map = type_map.type(torch.float32)
             pred_dict["tp"] = type_map
