@@ -7,12 +7,17 @@ from misc.utils import center_pad_to_shape, cropping_center
 from .utils import crop_to_shape, dice_loss, mse_loss, xentropy_loss, get_bboxes,focal_loss,add_class,get_infer_bboxes
 import os
 from collections import OrderedDict
-####
 
-edge_num = 4
-point_num = 18
+import gc
+from .loss_functions import asym_unified_focal_loss
+from sklearn.metrics import f1_score
+####
 # training_weights = [2.184124994534404, 5.38417317883769, 2.805669191091806] 
 # Weights for each class [others,healthy,malignant] counting cells in crops
+
+def empty_trash():
+    gc.collect()
+    torch.cuda.empty_cache()
 
 def get_expanded_positions(original_positions, added_length):
     return [a*added_length + i for a in original_positions for i in range(added_length)]
@@ -27,6 +32,7 @@ def get_train_step(training_weights, only_epithelial):
             "dice": dice_loss,
             "mse": mse_loss,
             "focal": focal_loss,
+            "new_seg_loss": asym_unified_focal_loss()
         }
         # use 'ema' to add for EMA calculation, must be scalar!
         result_dict = {"EMA": {}}
@@ -37,12 +43,12 @@ def get_train_step(training_weights, only_epithelial):
 
         ####
         imgs = batch_data["img"]
-        inst_map = batch_data["inst_map"]
+        # inst_map = batch_data["inst_map"]
         #cv2.imwrite('batch_img.png',np.array(imgs[0,:,:]))
         #cv2.imwrite('batch.png',np.uint8(np.array(inst_map[0,:,:])))
         #true_hv = batch_data["hv_map"]
 
-        imgs = imgs.to(device).type(torch.float32)  # to NCHW
+        imgs = imgs.type(torch.float32)  # to NCHW
         imgs = imgs.permute(0, 3, 1, 2).contiguous()
 
         # HWC
@@ -79,9 +85,7 @@ def get_train_step(training_weights, only_epithelial):
         batch_select_shape_feats = batch_data['batch_select_shape_feats']
         inst_classes = batch_data['inst_classes']
 
-        #batch_centers = torch.stack(batch_centers)
-        #batch_edge_matrix = torch.stack(batch_edge_matrix)
-        #batch_pos_emb = torch.stack(batch_pos_emb)
+
         inst_classes = torch.cat(inst_classes,0) - 1 # for one-hot encoding num of cell types (2/3) needs to be bigger than the values of the tensor (0,1/0,1,2)
         #print(inst_classes.shape)
         #print('count: ',torch.bincount(torch.squeeze(inst_classes).int()))
@@ -121,7 +125,10 @@ def get_train_step(training_weights, only_epithelial):
                 loss += loss_weight * term_loss
         loss.backward()
         optimizer.step()
+        track_value("overall_loss", loss.cpu().item())      
         ####
+        del imgs, true_dict, pred_dict
+        empty_trash()
         return result_dict
     
     return train_step
@@ -136,22 +143,16 @@ def get_valid_step(only_epithelial):
         model.eval()  # infer mode
 
         ####
-        imgs = batch_data["img"]
         #true_np = batch_data["np_map"]
         #true_hv = batch_data["hv_map"]
-        inst_map = batch_data["inst_map"]
-        imgs_gpu = imgs.to(device).type(torch.float32)  # to NCHW
-        imgs_gpu = imgs_gpu.permute(0, 3, 1, 2).contiguous()
+        # inst_map = batch_data["inst_map"]
+        imgs = batch_data["img"].type(torch.float32)  # to NCHW
+        imgs= imgs.permute(0, 3, 1, 2).contiguous()
 
         # HWC
-        #true_np = torch.squeeze(true_np).to("cuda").type(torch.int64)
-        #true_hv = torch.squeeze(true_hv).to("cuda").type(torch.float32)
 
         true_dict = {
-            #"np": true_np,
-            #"hv": true_hv,
         }
-
         if model.module.nr_types is not None:
             true_tp = batch_data["tp_map"]
 
@@ -185,7 +186,7 @@ def get_valid_step(only_epithelial):
         # * Its up to user to define the protocol to process the raw output per step!
         result_dict = {  # protocol for contents exchange within `raw`
             "raw": {
-                "imgs": imgs.numpy(),
+                "imgs": batch_data["img"].numpy(),
                 #"pred_classes": pred_dict["np"].cpu().numpy(),
                 #"pred_hv": pred_dict["hv"].cpu().numpy(),
             }
@@ -195,11 +196,15 @@ def get_valid_step(only_epithelial):
         if model.module.nr_types is not None:
             result_dict["raw"]["true_tp"] = true_dict["tp"].cpu().unsqueeze(-1).numpy()
             result_dict["raw"]["pred_tp"] = type_map.cpu().unsqueeze(-1).numpy()
+            result_dict["raw"]["true_class"] = inst_classes.view_as(pred_classes).cpu().numpy()
+            result_dict["raw"]["pred_class"] = pred_classes.cpu().numpy()
+        empty_trash()
         return result_dict
     return valid_step
 
 ####
-def infer_step(batch_data, model,mode='test'):
+
+def infer_step(batch_data, model, mode='test'):
 
     ####
     patch_imgs = batch_data['img']
@@ -207,13 +212,8 @@ def infer_step(batch_data, model,mode='test'):
     inst_map = batch_data["inst_map"]
     patch_imgs_gpu = patch_imgs.to(device).type(torch.float32)  # to NCHW
     patch_imgs_gpu = patch_imgs_gpu.permute(0, 3, 1, 2).contiguous()
-    # batch_bboxes = []
-    # batch_centers = []
-    # batch_edge_points = []
-    # batch_edge_indexs = []
-    # batch_pos_emb = []
-    # batch_length = []
-    # batch_select_shape_feats = []
+    edge_num = 4
+    point_num = 18
 
     ####
     model.eval()  # infer mode
@@ -284,18 +284,12 @@ def viz_step_output(raw_data, nr_types=None):
 
         true_viz_list = [img]
         # cmap may randomly fails if of other types
-        #true_viz_list.append(colorize(true_np[idx], 0, 1))
-        #true_viz_list.append(colorize(true_hv[idx][..., 0], -1, 1))
-        #true_viz_list.append(colorize(true_hv[idx][..., 1], -1, 1))
         if nr_types is not None:  # TODO: a way to pass through external info
             true_viz_list.append(colorize(true_tp[idx], 0, nr_types))
         true_viz_list = np.concatenate(true_viz_list, axis=1)
 
         pred_viz_list = [img]
-        # cmap may randomly fails if of other types
-        #pred_viz_list.append(colorize(pred_np[idx], 0, 1))
-        #pred_viz_list.append(colorize(pred_hv[idx][..., 0], -1, 1))
-        #pred_viz_list.append(colorize(pred_hv[idx][..., 1], -1, 1))
+
         if nr_types is not None:
             pred_viz_list.append(colorize(pred_tp[idx], 0, nr_types))
         pred_viz_list = np.concatenate(pred_viz_list, axis=1)
@@ -363,10 +357,6 @@ def proc_valid_step_output(raw_data, nr_types=None):
     imgs = raw_data["imgs"]
     selected_idx = np.random.randint(0, len(imgs), size=(8,)).tolist()
     imgs = np.array([imgs[idx] for idx in selected_idx])
-    #true_np = np.array([true_np[idx] for idx in selected_idx])
-    #true_hv = np.array([true_hv[idx] for idx in selected_idx])
-    #prob_np = np.array([prob_np[idx] for idx in selected_idx])
-    #pred_hv = np.array([pred_hv[idx] for idx in selected_idx])
     viz_raw_data = {"img": imgs}
 
 
