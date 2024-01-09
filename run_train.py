@@ -22,13 +22,10 @@ faulthandler.enable()
 #cv2.setNumThreads(0)
 import argparse
 import glob
-import importlib
 import inspect
 import json
 import os
-import shutil
 from natsort import natsorted
-import matplotlib
 import numpy as np
 import torch
 from docopt import docopt
@@ -38,10 +35,11 @@ from torch.nn import DataParallel  # TODO: switch to DistributedDataParallel
 from run_utils.utils import MultiEpochsDataLoader as DataLoader
 # import torchcontrib
 # from torchcontrib.optim import SWA
-from config import Config
-from dataloader.train_loader import FileLoader
+from config_custom import Config
+from dataloader.train_loader import FileLoader, collate_fn
 from misc.utils import rm_n_mkdir, parse_json_file
-from run_utils.engine import RunEngine
+from run_utils.engine import RunEngine, Events
+from run_utils.callbacks.base import ScheduleLr
 from run_utils.utils import (
     check_log_dir,
     check_manual_seed,
@@ -51,6 +49,11 @@ from run_utils.utils import (
 )
 import argparse
 
+torch.multiprocessing.set_sharing_strategy('file_system')
+pool = torch.multiprocessing.Pool(torch.multiprocessing.cpu_count(), maxtasksperchild=1)
+import resource
+rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 
 #### have to move outside because of spawn
 # * must initialize augmentor per worker, else duplicated rng generators may happen
@@ -76,7 +79,7 @@ def get_args():
     parser.add_argument('--val_file', type=str)
     parser.add_argument('--train_file', type=str)
     parser.add_argument('--save_dir', type=str, help='directory where the checkpoints after each epoch will be saved')
-    parser.add_argument('--source_dir', type=str, default='/storage/homefs/jg23p152/project/', help='path to project folder (where data is stored)')
+    parser.add_argument('--source_dir', type=str, default='/storage/scratch/shared/jg23p152/', help='path to project folder (where data is stored)')
 
     ## Model training arguments
     parser.add_argument('--dataset_name', type=str, default='lizard')
@@ -85,6 +88,7 @@ def get_args():
     parser.add_argument('--batch_size', type=str, default='10,4', help='batch size for each training phase separated by comma')
     parser.add_argument('--nr_epochs', type=str, default='50,50', help='number of epochs for each training phase separated by comma')
     parser.add_argument('--save_best_only', action='store_true', help='use if you only want the best epoch checkpoint to be saved')
+    parser.add_argument('--continue_training', action='store_true', help='use if you want to continue training from a previous checkpoint after a job stops or crashes')
     parser.add_argument('--early_stopping', type=int, default=1000, help='number of epochs to wait before stopping training if validation loss does not improve')
     parser.add_argument('--only_epithelial', action='store_true', help='use if you only want to train on epithelial cells')
     parser.add_argument('--edge_num', type=int, default=4, help='number of edges per node in the graph')
@@ -153,6 +157,9 @@ class TrainManager(Config):
         print("Dataset %s: %d" % (run_mode, len(file_list)))
         input_dataset = FileLoader(
             file_list,
+            only_epithelial=self.only_epithelial,
+            point_num=self.point_num,
+            edge_num=self.edge_num,
             mode=run_mode,
             with_type=self.type_classification,
             setup_augmentor=nr_procs == 0,
@@ -223,6 +230,7 @@ class TrainManager(Config):
                     max(epoch_list),
                 )
             else:
+                # prev_phase_dir = '/storage/homefs/jg23p152/project/Results/StructGraph_train_or_setting_all_tp/cv0/01'
                 last_chkpts_path = os.path.join(prev_phase_dir, "%s_last_epoch.tar" % net_name)
             return last_chkpts_path
 
@@ -241,11 +249,12 @@ class TrainManager(Config):
             # summary_string(net_desc, (3, 270, 270), device='cpu')
 
             pretrained_path = net_info["pretrained"]
+            # Include process to check if there is a previous checkpoint to load
             if pretrained_path is not None:
                 if pretrained_path == -1:
                     # * depend on logging format so may be broken if logging format has been changed
                     pretrained_path = get_last_chkpt_path(prev_log_dir, net_name)
-                    net_state_dict = torch.load(pretrained_path)
+                    net_state_dict = torch.load(pretrained_path, map_location=self.device)
                 else:
                     chkpt_ext = os.path.basename(pretrained_path).split(".")[-1]
                     if chkpt_ext == "npz":
@@ -265,6 +274,7 @@ class TrainManager(Config):
 
                 # load_state_dict returns (missing keys, unexpected keys)
                 global_epoch = net_state_dict['epoch'] if 'epoch' in net_state_dict else 0
+                current_epoch = global_epoch if opt['phase_id'] == 0 else global_epoch - opt['nr_epochs_total'][0]
                 net_state_dict = convert_pytorch_checkpoint(net_state_dict["desc"])
                 load_feedback = net_desc.load_state_dict(net_state_dict, strict=False)
                 # * uncomment for your convenience
@@ -281,7 +291,7 @@ class TrainManager(Config):
             #optimizer = torchcontrib.optim.SWA(optimizer, swa_start=10, swa_freq=5, swa_lr=0.05)
 
             #optimizer.swap_swa_sgd()
- 
+            
             # training loop
             if continue_training:
                 # option 1: load before first LR update
