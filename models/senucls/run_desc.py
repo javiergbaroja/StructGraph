@@ -326,28 +326,13 @@ def proc_valid_step_output(raw_data, nr_types=None):
     over_inter = 0
     over_total = 0
     over_correct = 0
-    #prob_np = raw_data["prob_np"]
-    #print(len(prob_np))
-    #true_np = raw_data["true_np"]
-    #print(len(true_np))
-    #for idx in range(len(raw_data["true_np"])):
-        #patch_prob_np = prob_np[idx]
-        #patch_true_np = true_np[idx]
-        #patch_pred_np = np.array(patch_prob_np > 0.5, dtype=np.int32)
-        #inter, total = _dice_info(patch_true_np, patch_pred_np, 1)
-        #correct = (patch_pred_np == patch_true_np).sum()
-        #over_inter += inter
-        #over_total += total
-        #over_correct += correct
-    #nr_pixels = len(true_np) * np.size(true_np[0])
-    #acc_np = over_correct / nr_pixels
-    #dice_np = 2 * over_inter / (over_total + 1.0e-8)
-    #track_value("np_acc", acc_np, "scalar")
-    #track_value("np_dice", dice_np, "scalar")
 
     # * TP statistic
     pred_tp = raw_data["pred_tp"]
     true_tp = raw_data["true_tp"]
+    pred_class = F.one_hot(torch.tensor(raw_data["pred_class"]).long()).numpy()
+    true_class = F.one_hot(torch.tensor(raw_data["true_class"]).long()).numpy()
+    f1s = []
     #print(len(true_tp))
     #print(pred_tp.shape)
     for type_id in range(0, nr_types):
@@ -360,21 +345,19 @@ def proc_valid_step_output(raw_data, nr_types=None):
             over_inter += inter
             over_total += total
         dice_tp = 2 * over_inter / (over_total + 1.0e-8)
-        track_value("tp_dice_%d" % type_id, dice_tp, "scalar")
+        track_value(f"tp_dice_{type_id}", dice_tp, "scalar")
+        if type_id > 0:
+            f1 = f1_score(true_class[:,type_id-1], pred_class[:,type_id-1])
+            f1s.append(f1)
+            track_value(f"tp_f1-score_{type_id}", f1, "scalar")
+    
+    # f1 = f1_score(true_class, pred_class, average='weighted')
+    true_class_n = true_class.sum(0)[-2:]
+    f1w = f1s[-2:]
+    f1w = sum([f1w[i]*true_class_n[i]/true_class_n.sum() for i in range(len(f1w))])
 
-    # * HV regression statistic
-    #pred_hv = raw_data["pred_hv"]
-    #true_hv = raw_data["true_hv"]
+    track_value(f"tp_f1-score_w", f1w, "scalar")
 
-    #over_squared_error = 0
-    #for idx in range(len(raw_data["true_np"])):
-     #   patch_pred_hv = pred_hv[idx]
-      #  patch_true_hv = true_hv[idx]
-       # squared_error = patch_pred_hv - patch_true_hv
-        #squared_error = squared_error * squared_error
-        #over_squared_error += squared_error.sum()
-    #mse = over_squared_error / nr_pixels
-    #track_value("hv_mse", mse, "scalar")
 
     # *
     imgs = raw_data["imgs"]
