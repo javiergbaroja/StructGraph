@@ -166,6 +166,7 @@ class TrainManager(Config):
             shuffle=run_mode == "train",
             drop_last=run_mode == "train",
             worker_init_fn=worker_init_fn,
+            collate_fn=collate_fn,
         )
         return dataloader
 
@@ -175,9 +176,19 @@ class TrainManager(Config):
         check_manual_seed(self.seed)
 
         log_info = {}
+        continue_training = False
         if self.logging:
             # check_log_dir(log_dir)
-            rm_n_mkdir(log_dir)
+            if not opt["continue_training"]:
+                rm_n_mkdir(log_dir)
+            elif not os.path.isfile(os.path.join(log_dir, 'net_last_epoch.tar')):
+                rm_n_mkdir(log_dir)
+            else:
+                os.makedirs(log_dir, exist_ok=True)
+                opt["run_info"]["net"]["pretrained"] = -1
+                prev_log_dir = log_dir
+                continue_training = True
+
 
             tfwriter = SummaryWriter(log_dir=log_dir)
             json_log_file = log_dir + "/stats.json"
@@ -271,8 +282,25 @@ class TrainManager(Config):
             #optimizer.swap_swa_sgd()
  
             # training loop
-
+            if continue_training:
+                # option 1: load before first LR update
+                if current_epoch <= net_info["scheduler_patience"]:
+                    run_engine_opt["train"]["callbacks"][Events.EPOCH_COMPLETED][-1]._update_start_epoch(current_epoch,net_info["scheduler_patience"])
+                
+                # option 2: load between updates. Optimizer should be directly updated to the last LR and we need to know nr of epochs until next update
+                else:
+                    nr_updates = current_epoch // net_info["scheduler_patience"]
+                    for g in optimizer.param_groups:
+                        g['lr'] *= 0.1 ** nr_updates
+                    run_engine_opt["train"]["callbacks"][Events.EPOCH_COMPLETED][-1]._update_start_epoch(current_epoch % net_info["scheduler_patience"],net_info["scheduler_patience"])
+                # else:
+                #     scheduler_epoch = current_epoch - opt["nr_epochs"]
+            else:
+                   run_engine_opt["train"]["callbacks"][Events.EPOCH_COMPLETED][-1]._update_start_epoch(0,net_info["scheduler_patience"])
+            # else:
+            #     scheduler_epoch = 0
             # TODO: expand for external aug for scheduler
+            
             nr_iter = opt["nr_epochs"] * len(loader_dict["train"])
             scheduler = net_info["lr_scheduler"](optimizer)
             net_run_info[net_name] = {
@@ -310,13 +338,16 @@ class TrainManager(Config):
                     runner.add_event_handler(event, callback)
 
         # retrieve main runner
-        main_runner = runner_dict["train"]
-        main_runner.state.logging = self.logging
-        main_runner.state.log_dir = log_dir
-        main_runner.state.global_epoch = global_epoch
-        runner_dict["valid"].state.global_epoch = global_epoch
-        # start the run loop
-        main_runner.run(opt["nr_epochs"])
+        
+        if current_epoch < opt["nr_epochs"]:
+            main_runner = runner_dict["train"]
+            main_runner.state.logging = self.logging
+            main_runner.state.log_dir = log_dir
+            main_runner.state.global_epoch = global_epoch
+            main_runner.state.curr_epoch = current_epoch
+            runner_dict["valid"].state.global_epoch = global_epoch
+            # start the run loop
+            main_runner.run(opt["nr_epochs"])
 
         print("\n")
         print("########################################################")
