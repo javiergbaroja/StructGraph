@@ -113,8 +113,8 @@ def get_train_step(training_weights, only_epithelial):
                 #print(loss_name)
                 loss_func = loss_func_dict[loss_name]
                 loss_args = [true_dict[branch_name], pred_map]
-                # if loss_name == "msge":
-                #     loss_args.append(true_np_onehot[..., 1])
+                if loss_name == "focal":
+                    loss_args = [pred_classes, true_inst_classes_onehot, training_weights]
                 term_loss = loss_func(*loss_args)
                 track_value("loss_%s_%s" % (branch_name, loss_name), term_loss.cpu().item())
                 #print(term_loss)
