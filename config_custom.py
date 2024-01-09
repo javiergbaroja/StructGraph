@@ -78,7 +78,7 @@ class Config(object):
         self.dataset = get_dataset(self.dataset_name)
 
         module = importlib.import_module(
-            "models.%s.opt_custom" % model_name
+            "models.%s.opt" % model_name
         )
         self.model_config = module.get_config(args.nr_type, 
                                               model_mode, 

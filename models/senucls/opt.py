@@ -14,7 +14,7 @@ from run_utils.callbacks.base import (
 from run_utils.callbacks.logging import LoggingEpochOutput, LoggingGradient
 from run_utils.engine import Events
 
-from .targets import gen_targets, prep_sample
+from .targets_custom import gen_targets, prep_sample
 from .net_desc import create_model
 from .run_desc import proc_valid_step_output, get_train_step, get_valid_step, viz_step_output
 
@@ -29,7 +29,8 @@ def get_config(nr_type:int,
                batch_size:list=[16, 4], 
                nr_epochs:list=[50,50], 
                save_best_only:bool=False,
-               patience:int=10000):
+               patience:int=10000,
+               continue_training:bool=True):
     return {
         # ------------------------------------------------------------------
         # ! All phases have the same number of run engine
@@ -51,12 +52,12 @@ def get_config(nr_type:int,
                             },
                         ],
                         # learning rate scheduler
+                        "scheduler_patience": 25,
                         "lr_scheduler": lambda x: optim.lr_scheduler.StepLR(x, 25),
                         "extra_info": {
                             "loss": {
-                                "np": {"bce": 1, "dice": 2},
-                                "hv": {"mse": 1, "msge": 1},
-                                "tp": {"bce": 1, "dice": 2},
+                                "np": {"bce": 1, "dice": 2, "focal":1},
+                                "tp": {"bce": 1, "dice": 2, "focal":1},
                             },
                         },
                         # path to load, -1 to auto load checkpoint from previous phase,
@@ -67,8 +68,11 @@ def get_config(nr_type:int,
                     },
                 },
                 "target_info": {"gen": (gen_targets, {}), "viz": (prep_sample, {})},
-                "batch_size": {"train": batch_size[0], "valid": batch_size[0]*2},  # engine name : value
+                "batch_size": {"train": batch_size[0], "valid": batch_size[0]*6},  # engine name : value
                 "nr_epochs": nr_epochs[0],
+                "nr_epochs_total": nr_epochs,
+                "continue_training": continue_training,
+                "phase_id":0,
             },
             {
                 "run_info": {
@@ -86,12 +90,12 @@ def get_config(nr_type:int,
                             },
                         ],
                         # learning rate scheduler
+                        "scheduler_patience": 25,
                         "lr_scheduler": lambda x: optim.lr_scheduler.StepLR(x, 25),
                         "extra_info": {
                             "loss": {
-                                "np": {"bce": 1, "dice": 1},
-                                "hv": {"mse": 1, "msge": 1},
-                                "tp": {"bce": 1, "dice": 1},
+                                "np": {"bce": 1, "dice": 1, "focal":1},
+                                "tp": {"bce": 1, "dice": 1, "focal":1},
                             },
                         },
                         # path to load, -1 to auto load checkpoint from previous phase,
@@ -101,8 +105,11 @@ def get_config(nr_type:int,
                     },
                 },
                 "target_info": {"gen": (gen_targets, {}), "viz": (prep_sample, {})},
-                "batch_size": {"train": batch_size[1]*2, "valid": batch_size[1]*2,}, # batch size per gpu
+                "batch_size": {"train": batch_size[1], "valid": batch_size[0]*6,}, # batch size per gpu
                 "nr_epochs": nr_epochs[1],
+                "nr_epochs_total": nr_epochs,
+                "continue_training": continue_training,
+                "phase_id":1,
             },
         ],
         # ------------------------------------------------------------------
@@ -113,7 +120,7 @@ def get_config(nr_type:int,
             "train": {
                 # TODO: align here, file path or what? what about CV?
                 "dataset": "",  # whats about compound dataset ?
-                "nr_procs": 16,  # number of threads for dataloader
+                "nr_procs": 11,  # number of threads for dataloader
                 "run_step": get_train_step(class_weights, only_epithelial),  # TODO: function name or function variable ?
                 "reset_per_run": False,
                 # callbacks are run according to the list order of the event
@@ -124,7 +131,7 @@ def get_config(nr_type:int,
                     ],
                     Events.EPOCH_COMPLETED: [
                         TrackLr(),
-                        VisualizeOutput(viz_step_output),
+                        # VisualizeOutput(viz_step_output),
                         LoggingEpochOutput(),
                         # PeriodicSaver(save_best_only=save_best_only),
                         TriggerEngine("valid"),
@@ -134,7 +141,7 @@ def get_config(nr_type:int,
             },
             "valid": {
                 "dataset": "",  # whats about compound dataset ?
-                "nr_procs": 8,  # number of threads for dataloader
+                "nr_procs": 7,  # number of threads for dataloader
                 "run_step": get_valid_step(only_epithelial),
                 "reset_per_run": True,  # * to stop aggregating output etc. from last run
                 # callbacks are run according to the list order of the event
@@ -146,7 +153,7 @@ def get_config(nr_type:int,
                             lambda a: proc_valid_step_output(a, nr_types=nr_type)
                         ),
                         LoggingEpochOutput(),
-                        PeriodicSaver(save_best_only=save_best_only, patience=patience),
+                        PeriodicSaver(save_best_only=save_best_only, patience=patience, track_stat='tp_dice', track_classes=[1,2] if only_epithelial else [2,3]),
                     ],
                 },
             },
