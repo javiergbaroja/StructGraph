@@ -119,53 +119,9 @@ def get_train_step(training_weights, only_epithelial):
                 track_value("loss_%s_%s" % (branch_name, loss_name), term_loss.cpu().item())
                 #print(term_loss)
                 loss += loss_weight * term_loss
-            class_loss = focal_loss(pred_classes,true_inst_classes_onehot,training_weights)
-            track_value("loss_%s_%s" % (branch_name, "focal"), class_loss.cpu().item())
-            #print(class_loss)
-            loss += class_loss
-
-        track_value("overall_loss", loss.cpu().item())
-        # * gradient update
-        correct = inst_classes.cpu().numpy().reshape(inst_classes.shape[0])
-        #print(correct)
-        prediction = torch.argmax(pred_classes, 1).cpu().numpy()
-        acc_all = (prediction == correct).mean()
-        acc = [0 for c in range(model.module.nr_types-1)]
-        print('accu_all',acc_all)
-        #print(prediction)
-        #print(correct)
-        for c in range(model.module.nr_types-1):
-            acc[c] = ((prediction == correct) * (correct == c)).sum() / (max((correct == c).sum(), 1))
-        print('accu_per',acc)
-        # torch.set_printoptions(precision=10)
         loss.backward()
         optimizer.step()
         ####
-
-        # pick 2 random sample from the batch for visualization
-        sample_indices = 0
-        #print(imgs[0].shape)
-        imgs = (imgs[sample_indices].view(1,imgs.shape[1],imgs.shape[2],imgs.shape[3])).byte()  # to uint8
-        #print(imgs.shape)
-        imgs = imgs.permute(0, 2, 3, 1).contiguous().cpu().numpy()
-
-        #pred_dict["np"] = pred_dict["np"][..., 1]  # return pos only
-        pred_dict = {
-            k: v[0][sample_indices,...].detach().cpu().permute(1, 2, 0).unsqueeze(0).numpy() for k, v in pred_dict.items()
-        }
-
-        #true_dict["np"] = true_np
-        true_dict = {
-            k: v[sample_indices].detach().cpu().unsqueeze(0).numpy() for k, v in true_dict.items()
-        }
-
-        # * Its up to user to define the protocol to process the raw output per step!
-        result_dict["raw"] = {  # protocol for contents exchange within `raw`
-            "img": imgs,
-            "tp": (true_dict["tp"], pred_dict["tp"]),
-            #"np": (true_dict["np"], pred_dict["np"]),
-            #"hv": (true_dict["hv"], pred_dict["hv"]),
-        }
         return result_dict
     
     return train_step
