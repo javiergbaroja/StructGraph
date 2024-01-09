@@ -1,15 +1,8 @@
-import csv
-import glob
-import os
-import re
 
-import cv2
-import matplotlib.pyplot as plt
+from skimage.morphology import remove_small_objects
 import numpy as np
-import scipy.io as sio
 import torch.utils.data
 import random
-import imgaug as ia
 from imgaug import augmenters as iaa
 from misc.utils import cropping_center
 from dataloader.augs import fix_mirror_padding
@@ -21,7 +14,29 @@ from .augs import (
     gaussian_blur,
     median_blur,
 )
+import sys
+sys.path.append('../')
+from models.senucls.utils import get_bboxes_skimage as get_bboxes
+# from models.senucls.utils import get_bboxes
 
+def collate_fn(batch:list):
+    new_batch = {}
+
+    new_batch['img'] = torch.stack([b['img'] for b in batch], dim=0)
+    new_batch['inst_map'] = torch.stack([b['inst_map'] for b in batch], dim=0)
+    new_batch['tp_map'] = torch.stack([b['tp_map'] for b in batch], dim=0)
+    new_batch['np_map'] = torch.stack([b['np_map'] for b in batch], dim=0)
+
+    new_batch['batch_select_shape_feats'] = [b['select_shape_feats'] for b in batch]
+    new_batch['batch_length'] = [b['length'] for b in batch]
+    new_batch['batch_boxes'] = [b['boxes'] for b in batch]
+    new_batch['batch_centers'] = [b['centers'] for b in batch]
+    new_batch['batch_edge_points'] = [b['edge_points']for b in batch]
+    new_batch['batch_edge_indexs'] = [b['edge_indexs'] for b in batch]
+    new_batch['batch_pos_emb'] = [b['pos_emb'] for b in batch]
+    new_batch['inst_classes'] = [b['inst_classes'] for b in batch]
+    
+    return new_batch
 
 ####
 class FileLoader(torch.utils.data.Dataset):
@@ -43,6 +58,9 @@ class FileLoader(torch.utils.data.Dataset):
     def __init__(
         self,
         file_list,
+        only_epithelial:bool,
+        edge_num:int,
+        point_num:int,
         with_type=False,
         input_shape=None,
         mask_shape=None,
@@ -52,6 +70,9 @@ class FileLoader(torch.utils.data.Dataset):
     ):
         assert input_shape is not None and mask_shape is not None
         self.mode = mode
+        self.only_epithelial = only_epithelial
+        self.edge_num = edge_num
+        self.point_num = point_num
         self.info_list = file_list
         self.with_type = with_type
         self.mask_shape = mask_shape
@@ -84,17 +105,25 @@ class FileLoader(torch.utils.data.Dataset):
         if self.shape_augs is not None:
             shape_augs = self.shape_augs.to_deterministic()
             img = shape_augs.augment_image(img)
-            ann = shape_augs.augment_image(ann)
+            ann = shape_augs.augment_image(ann).copy()
 
         if self.input_augs is not None:
             input_augs = self.input_augs.to_deterministic()
             img = input_augs.augment_image(img)
 
         img = cropping_center(img, self.input_shape)
-        feed_dict = {"img": img}
+        # feed_dict = {"img": torch.from_numpy(img)}
 
-        inst_map = ann[..., 0]  # HW1 -> HW
-        inst_map = fix_mirror_padding(inst_map)
+        inst_map = cropping_center(ann[..., 0], self.mask_shape)  # HW1 -> HW
+        inst_map = torch.from_numpy(remove_small_objects(fix_mirror_padding(inst_map), min_size=10))
+        # inst_map = torch.from_numpy(label(fix_mirror_padding(inst_map).copy()>0))
+        
+        if self.with_type:
+            type_map = torch.from_numpy(cropping_center(ann[..., 1], self.mask_shape))
+
+        if self.only_epithelial:
+            inst_map *= (type_map != 0)
+
         obj_ids = np.unique(inst_map)
         while len(obj_ids) == 1:
             #print(obj_ids)
@@ -102,7 +131,7 @@ class FileLoader(torch.utils.data.Dataset):
             new_idx = random.randint(0,len(self.info_list)-1)
             path = self.info_list[new_idx]
             #print(path)
-            data = np.load(path)
+            data = np.load(path, allow_pickle=True)[..., :5]
 
             # split stacked channel into image and label
             img = (data[..., :3]).astype("uint8")  # RGB images
@@ -111,33 +140,52 @@ class FileLoader(torch.utils.data.Dataset):
             if self.shape_augs is not None:
                 shape_augs = self.shape_augs.to_deterministic()
                 img = shape_augs.augment_image(img)
-                ann = shape_augs.augment_image(ann)
+                ann = shape_augs.augment_image(ann).copy()
 
             if self.input_augs is not None:
                 input_augs = self.input_augs.to_deterministic()
                 img = input_augs.augment_image(img)
 
             img = cropping_center(img, self.input_shape)
-            feed_dict = {"img": img}
+            # feed_dict = {"img": torch.from_numpy(img)}
 
-            inst_map = ann[..., 0]  # HW1 -> HW
-            inst_map = fix_mirror_padding(inst_map)
+            # inst_map =  ann[..., 0]# HW1 -> HW
+
+            # inst_map = torch.from_numpy(label(fix_mirror_padding(inst_map).copy()>0))
+            inst_map = torch.from_numpy((remove_small_objects(fix_mirror_padding(cropping_center(ann[..., 0], self.mask_shape)), min_size=10)))
+
+            if self.with_type:
+                type_map = torch.from_numpy(cropping_center(ann[..., 1], self.mask_shape))
+
+            if self.only_epithelial:
+                inst_map *= (type_map != 0)
+
             obj_ids = np.unique(inst_map)
-            
-            
-            
-            
-        if self.with_type:
-            type_map = (ann[..., 1]).copy()
-            type_map = cropping_center(type_map, self.mask_shape)
-            #type_map[type_map == 5] = 1  # merge neoplastic and non-neoplastic
-            feed_dict["tp_map"] = type_map
 
         # TODO: document hard coded assumption about #input
-        target_dict = self.target_gen_func(
-            inst_map, self.mask_shape, **self.target_gen_kwargs
-        )
-        feed_dict.update(target_dict)
+        np_map = self.target_gen_func(
+            inst_map, self.mask_shape, **self.target_gen_kwargs)
+        # feed_dict.update(target_dict)
+
+        if not self.only_epithelial:
+            type_map += np_map
+        
+        boxes, inst_class, centers, edge_points, edge_index, pos_emb, select_shape_feats = get_bboxes(inst_map, type_map, self.edge_num, self.point_num)
+        
+        feed_dict = {
+            "img": torch.from_numpy(img),
+            "inst_map": inst_map,
+            "np_map": np_map,
+            "tp_map": type_map,
+            "select_shape_feats": select_shape_feats,
+            "length": centers.shape[0],
+            "boxes": boxes,
+            "centers": centers,
+            "edge_points": edge_points,
+            "edge_indexs": edge_index,
+            "pos_emb": pos_emb,
+            "inst_classes": inst_class.reshape(inst_class.shape[0],1)
+            }
 
         return feed_dict
 
