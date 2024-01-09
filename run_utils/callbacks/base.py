@@ -49,12 +49,29 @@ class TrackLr(BaseCallbacks):
 class ScheduleLr(BaseCallbacks):
     """Trigger all scheduler."""
 
-    def __init__(self):
+    def _update_start_epoch(self, epoch, paticence=25):
+        self.start_epoch = epoch
+        self.scheduler_patience = paticence
+
+        print(f"First LR update in current training to take place in {self.scheduler_patience-epoch} epochs (relative).")
+
+    def __init__(self, start_epoch:int=0, total_epochs:int=50):
         super().__init__()
+        self.start_epoch = start_epoch
+        self.total_epochs = total_epochs
+
 
     def run(self, state, event):
         # logging learning rate, decouple into another callback?
         run_info = state.run_info
+
+        if self.start_epoch < self.scheduler_patience:
+            run_info['net']["lr_scheduler"].step_size =  self.scheduler_patience - self.start_epoch 
+            self.start_epoch = np.inf
+        
+        elif self.start_epoch == np.inf:
+            run_info['net']["lr_scheduler"].step_size = self.scheduler_patience
+        
         for net_name, net_info in run_info.items():
             net_info["lr_scheduler"].step()
         return
@@ -79,7 +96,7 @@ class TriggerEngine(BaseCallbacks):
 class PeriodicSaver(BaseCallbacks):
     """Must declare save dir first in the shared global state of the attached engine."""
 
-    def __init__(self, per_n_epoch=1, per_n_step=None, save_best_only:bool=False, patience:int=10000):
+    def __init__(self, per_n_epoch=1, per_n_step=None, save_best_only:bool=False, patience:int=10000, track_stat:str='tp_dice', track_classes:list=[1,2]):
         super().__init__()
         self.per_n_epoch = per_n_epoch
         self.per_n_step = per_n_step
@@ -88,6 +105,7 @@ class PeriodicSaver(BaseCallbacks):
         self.best_stat = -1
         self.patience = patience
         self.reset_patience = patience
+        self.track_stat = [f'{track_stat}_{i}' for i in track_classes]
 
     def run(self, state, event):
         # if not state.logging:
@@ -104,7 +122,9 @@ class PeriodicSaver(BaseCallbacks):
         
         if self.save_best_only:
             last_epoch_model_path = "%s/%s_last_epoch.tar" % (os.path.dirname(state.log_info['json_file']), net_name)
-            current_stat = state.tracked_step_output["scalar"]['tp_dice_1'] + state.tracked_step_output["scalar"]['tp_dice_2'] 
+            # We only look at Dice Score for epithelial class
+            current_stat = sum([state.tracked_step_output["scalar"][k] for k in state.tracked_step_output["scalar"].keys() if k in self.track_stat])
+            # current_stat = state.tracked_step_output["scalar"]['tp_dice_1'] + state.tracked_step_output["scalar"]['tp_dice_2'] 
             if current_stat > self.best_stat:
                 self.best_stat = current_stat
                 self.best_epoch = state.global_epoch
